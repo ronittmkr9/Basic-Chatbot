@@ -27,7 +27,7 @@ const Chatbot = () => {
     setLoading(true)
 
     try {
-      const res = await axios.post(`${process.env.REACT_APP_API_URL}/chat`, {
+      const res = await axios.post(`https://basic-chatbot-1-zu32.onrender.com/chat`, {
         message,
       })
 
