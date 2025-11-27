@@ -64,7 +64,7 @@ const Chatbot = () => {
       {/* Header */}
       <div style={styles.header}>
         <div style={styles.headerContent}>
-          <h1 style={styles.title}>AI Assistant</h1>
+          <h1 style={styles.title}>AI Assistant - Made by Ronit Tamrakar</h1>
           <p style={styles.subtitle}>Ready to help</p>
         </div>
       </div>
@@ -75,7 +75,7 @@ const Chatbot = () => {
           <div style={styles.emptyState}>
             <div style={styles.emptyIcon}>💬</div>
             <h2 style={styles.emptyTitle}>Start a conversation</h2>
-            <p style={styles.emptyText}>Ask me anything and I'll do my best to help</p>
+            <p style={styles.emptyText}>Ask me anything and I'll do my best to help.</p>
           </div>
         ) : (
           messages.map((msg) => (

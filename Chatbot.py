@@ -12,7 +12,9 @@ CORS(app)
 
 key = os.getenv("API_KEY")
 client = Groq(api_key=key)
+
 conversation_history = []
+
 
 def get_response(prompt):
   
@@ -31,8 +33,6 @@ def get_response(prompt):
 def chat():
     data = request.json
     message = data.get("message")
-    
-    # Call your Groq chatbot function
     reply = get_response(message)
     
     return jsonify({"reply": reply})
