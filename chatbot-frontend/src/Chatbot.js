@@ -1,304 +1,228 @@
-"use client"
-
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import axios from "axios"
+import ReactMarkdown from "react-markdown"
+import "./Chatbot.css"
 
-const Chatbot = () => {
-  const [messages, setMessages] = useState([])
-  const [message, setMessage] = useState("")
-  const [loading, setLoading] = useState(false)
-  const messagesEndRef = useRef(null)
+const API = process.env.REACT_APP_API_URL || "https://basic-chatbot-1-zu32.onrender.com"
+const STORAGE_KEY = "chatbot:session:v1"
+const MEMORY_MS = 24 * 60 * 60 * 1000 // chats are remembered for 1 day after the last message
+const HISTORY_LIMIT = 20 // how many past messages are sent to the model
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+const SUGGESTIONS = [
+  "Explain how an API works in simple terms",
+  "Help me debug a Python error",
+  "Write a short email asking for a deadline extension",
+]
+
+// Load saved chat; discard it if the last message is older than 4 hours.
+function loadMessages() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]")
+    if (!Array.isArray(saved) || saved.length === 0) return []
+    const last = saved[saved.length - 1].ts
+    if (Date.now() - last > MEMORY_MS) {
+      localStorage.removeItem(STORAGE_KEY)
+      return []
+    }
+    return saved
+  } catch {
+    return []
   }
+}
+
+function saveMessages(messages) {
+  try {
+    if (messages.length === 0) localStorage.removeItem(STORAGE_KEY)
+    else localStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
+  } catch {
+    /* storage unavailable (private mode / full) – chat still works, just isn't remembered */
+  }
+}
+
+const formatTime = (ts) =>
+  new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+export default function Chatbot() {
+  const [messages, setMessages] = useState(loadMessages)
+  const [input, setInput] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [waking, setWaking] = useState(false)
+  const endRef = useRef(null)
+  const inputRef = useRef(null)
+
+  // Persist on every change
+  useEffect(() => saveMessages(messages), [messages])
+
+  // Expire the chat while the tab stays open
+  useEffect(() => {
+    const id = setInterval(() => {
+      setMessages((prev) => {
+        if (prev.length && Date.now() - prev[prev.length - 1].ts > MEMORY_MS) return []
+        return prev
+      })
+    }, 60 * 1000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+  }, [messages, loading])
 
-  const sendMessage = async () => {
-    if (!message.trim()) return
+  // Auto-grow textarea
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = Math.min(el.scrollHeight, 180) + "px"
+  }, [input])
 
-    // Add user message to chat
-    const userMsg = { id: Date.now(), text: message, sender: "user", timestamp: new Date() }
-    setMessages((prev) => [...prev, userMsg])
-    setMessage("")
-    setLoading(true)
+  const send = useCallback(
+    async (text, { retry = false } = {}) => {
+      const content = text.trim()
+      if (!content || loading) return
 
-    try {
-      const res = await axios.post(`https://basic-chatbot-1-zu32.onrender.com/chat`, {
-        message,
-      })
+      // Conversation so far (without error bubbles) becomes the model's memory
+      let base = messages.filter((m) => !m.error)
+      if (retry) base = base.slice(0, -1) // the failed user message is re-sent below
+      const history = base
+        .slice(-HISTORY_LIMIT)
+        .map((m) => ({ role: m.role, content: m.text }))
 
-      // Add AI response to chat
-      const aiMsg = { id: Date.now() + 1, text: res.data.reply, sender: "ai", timestamp: new Date() }
-      setMessages((prev) => [...prev, aiMsg])
-    } catch (err) {
-      console.error(err)
-      const errorMsg = { id: Date.now() + 1, text: "Error connecting to backend.", sender: "ai", timestamp: new Date() }
-      setMessages((prev) => [...prev, errorMsg])
-    } finally {
-      setLoading(false)
-    }
-  }
+      const userMsg = { id: crypto.randomUUID(), role: "user", text: content, ts: Date.now() }
+      setMessages([...base, userMsg])
+      setInput("")
+      setLoading(true)
 
-  const handleKeyPress = (e) => {
+      const wakeTimer = setTimeout(() => setWaking(true), 6000)
+      try {
+        const res = await axios.post(
+          `${API}/chat`,
+          { message: content, history },
+          { timeout: 60000 }
+        )
+        const reply = { id: crypto.randomUUID(), role: "assistant", text: res.data.reply, ts: Date.now() }
+        setMessages((prev) => [...prev, reply])
+      } catch (err) {
+        let text = "Couldn't reach the server. Check your connection and try again."
+        if (err.code === "ECONNABORTED") text = "The server is taking too long to start. Try again in a moment."
+        else if (err.response?.data?.error) text = err.response.data.error
+        else if (err.response) text = `The server returned an error (${err.response.status}).`
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "assistant", text, ts: Date.now(), error: true, retryText: content },
+        ])
+      } finally {
+        clearTimeout(wakeTimer)
+        setWaking(false)
+        setLoading(false)
+        inputRef.current?.focus()
+      }
+    },
+    [messages, loading]
+  )
+
+  const onKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      sendMessage()
+      send(input)
     }
   }
 
-  const formatTime = (date) => {
-    return new Date(date).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
+  const newChat = () => {
+    setMessages([])
+    setInput("")
+    inputRef.current?.focus()
   }
 
   return (
-    <div style={styles.container}>
-      <style>{`
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-      `}</style>
-
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerContent}>
-          <h1 style={styles.title}>AI Assistant - Made by Ronit Tamrakar</h1>
-          <p style={styles.subtitle}>Ready to help</p>
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">R</span>
+          <div>
+            <h1>AI Assistant</h1>
+            <p>Built by Ronit Tamrakar</p>
+          </div>
         </div>
-      </div>
+        <button className="ghost" onClick={newChat} disabled={messages.length === 0}>
+          New chat
+        </button>
+      </header>
 
-      {/* Messages Container */}
-      <div style={styles.messagesContainer}>
-        {messages.length === 0 ? (
-          <div style={styles.emptyState}>
-            <div style={styles.emptyIcon}>💬</div>
-            <h2 style={styles.emptyTitle}>Start a conversation</h2>
-            <p style={styles.emptyText}>Ask me anything and I'll do my best to help.</p>
-          </div>
-        ) : (
-          messages.map((msg) => (
-            <div
-              key={msg.id}
-              style={{ ...styles.messageWrapper, justifyContent: msg.sender === "user" ? "flex-end" : "flex-start" }}
-            >
-              <div style={msg.sender === "user" ? styles.userMessage : styles.aiMessage}>
-                <p style={msg.sender === "user" ? styles.userText : styles.aiText}>{msg.text}</p>
-                <span style={styles.timestamp}>{formatTime(msg.timestamp)}</span>
+      <main className="thread" aria-live="polite">
+        <div className="thread-inner">
+          {messages.length === 0 ? (
+            <section className="empty">
+              <h2>What can I help with?</h2>
+              <p>Ask a question or pick a starting point.</p>
+              <div className="chips">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s} className="chip" onClick={() => send(s)}>
+                    {s}
+                  </button>
+                ))}
               </div>
-            </div>
-          ))
-        )}
+            </section>
+          ) : (
+            messages.map((m) => (
+              <article key={m.id} className={`msg ${m.role}${m.error ? " error" : ""}`}>
+                {m.role === "assistant" && <span className="avatar" aria-hidden="true">AI</span>}
+                <div className="bubble">
+                  {m.role === "assistant" && !m.error ? (
+                    <div className="md">
+                      <ReactMarkdown>{m.text}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p>{m.text}</p>
+                  )}
+                  <footer>
+                    <time>{formatTime(m.ts)}</time>
+                    {m.error && (
+                      <button className="retry" onClick={() => send(m.retryText, { retry: true })} disabled={loading}>
+                        Try again
+                      </button>
+                    )}
+                  </footer>
+                </div>
+              </article>
+            ))
+          )}
 
-        {loading && (
-          <div style={{ ...styles.messageWrapper, justifyContent: "flex-start" }}>
-            <div style={styles.loadingMessage}>
-              <div style={styles.loadingDot}></div>
-              <div style={styles.loadingDot}></div>
-              <div style={styles.loadingDot}></div>
-            </div>
-          </div>
-        )}
+          {loading && (
+            <article className="msg assistant">
+              <span className="avatar" aria-hidden="true">AI</span>
+              <div className="bubble">
+                <div className="typing" aria-label="Assistant is typing">
+                  <i /><i /><i />
+                </div>
+                {waking && <p className="hint">The server was asleep and is starting up. This can take up to a minute.</p>}
+              </div>
+            </article>
+          )}
+          <div ref={endRef} />
+        </div>
+      </main>
 
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input Container */}
-      <div style={styles.inputContainer}>
-        <div style={styles.inputWrapper}>
+      <div className="composer-wrap">
+        <div className="composer">
           <textarea
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Type your message... (Shift+Enter for new line)"
-            style={styles.input}
-            rows="1"
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Message the assistant"
+            rows={1}
+            maxLength={4000}
+            aria-label="Message"
           />
-          <button onClick={sendMessage} disabled={loading || !message.trim()} style={styles.button}>
-            <span style={styles.buttonText}>{loading ? "..." : "Send"}</span>
+          <button className="send" onClick={() => send(input)} disabled={loading || !input.trim()} aria-label="Send message">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 19V5M5 12l7-7 7 7" />
+            </svg>
           </button>
         </div>
+        <p className="note">Chats are saved in this browser for 1 day after your last message. Enter to send, Shift+Enter for a new line.</p>
       </div>
     </div>
   )
 }
-
-const styles = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100vh",
-    background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
-    color: "#e2e8f0",
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-  },
-  header: {
-    background: "rgba(30, 41, 59, 0.8)",
-    borderBottom: "1px solid rgba(148, 163, 184, 0.1)",
-    padding: "20px",
-    textAlign: "center",
-  },
-  headerContent: {
-    maxWidth: "800px",
-    margin: "0 auto",
-  },
-  title: {
-    margin: "0 0 5px 0",
-    fontSize: "24px",
-    fontWeight: "600",
-    background: "linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%)",
-    WebkitBackgroundClip: "text",
-    WebkitTextFillColor: "transparent",
-    backgroundClip: "text",
-  },
-  subtitle: {
-    margin: "0",
-    fontSize: "13px",
-    color: "#94a3b8",
-  },
-  messagesContainer: {
-    flex: 1,
-    overflowY: "auto",
-    padding: "20px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-    maxWidth: "800px",
-    margin: "0 auto",
-    width: "100%",
-  },
-  emptyState: {
-    textAlign: "center",
-    color: "#94a3b8",
-    paddingTop: "60px",
-  },
-  emptyIcon: {
-    fontSize: "48px",
-    marginBottom: "16px",
-  },
-  emptyTitle: {
-    margin: "0 0 8px 0",
-    fontSize: "18px",
-    fontWeight: "500",
-    color: "#cbd5e1",
-  },
-  emptyText: {
-    margin: "0",
-    fontSize: "14px",
-  },
-  messageWrapper: {
-    display: "flex",
-    marginBottom: "4px",
-  },
-  userMessage: {
-    background: "linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%)",
-    color: "#ffffff",
-    padding: "12px 16px",
-    borderRadius: "12px 12px 4px 12px",
-    maxWidth: "70%",
-    wordWrap: "break-word",
-    boxShadow: "0 2px 8px rgba(124, 58, 237, 0.3)",
-  },
-  aiMessage: {
-    background: "rgba(100, 116, 139, 0.2)",
-    color: "#e2e8f0",
-    padding: "12px 16px",
-    borderRadius: "12px 12px 12px 4px",
-    maxWidth: "70%",
-    wordWrap: "break-word",
-    border: "1px solid rgba(148, 163, 184, 0.15)",
-  },
-  userText: {
-    margin: "0 0 4px 0",
-    fontSize: "14px",
-    lineHeight: "1.4",
-  },
-  aiText: {
-    margin: "0 0 4px 0",
-    fontSize: "14px",
-    lineHeight: "1.4",
-  },
-  timestamp: {
-    fontSize: "11px",
-    opacity: "0.7",
-    display: "block",
-  },
-  loadingMessage: {
-    display: "flex",
-    gap: "4px",
-    padding: "12px 16px",
-  },
-  loadingDot: {
-    width: "8px",
-    height: "8px",
-    borderRadius: "50%",
-    background: "#a78bfa",
-    animation: "pulse 1.4s infinite",
-  },
-  inputContainer: {
-    background: "rgba(30, 41, 59, 0.8)",
-    borderTop: "1px solid rgba(148, 163, 184, 0.1)",
-    padding: "20px",
-    backdropFilter: "blur(10px)",
-  },
-  inputWrapper: {
-    display: "flex",
-    gap: "12px",
-    maxWidth: "800px",
-    margin: "0 auto",
-    width: "100%",
-  },
-  input: {
-    flex: 1,
-    background: "rgba(15, 23, 42, 0.6)",
-    border: "1px solid rgba(148, 163, 184, 0.2)",
-    borderRadius: "8px",
-    color: "#e2e8f0",
-    padding: "12px 16px",
-    fontSize: "14px",
-    fontFamily: "inherit",
-    outline: "none",
-    resize: "none",
-    maxHeight: "120px",
-    transition: "all 0.3s ease",
-    ":focus": {
-      borderColor: "rgba(167, 139, 250, 0.5)",
-    },
-  },
-  button: {
-    background: "linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%)",
-    color: "#ffffff",
-    border: "none",
-    borderRadius: "8px",
-    padding: "12px 24px",
-    fontSize: "14px",
-    fontWeight: "500",
-    cursor: "pointer",
-    transition: "all 0.3s ease",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    minWidth: "80px",
-    boxShadow: "0 2px 8px rgba(124, 58, 237, 0.3)",
-  },
-  buttonText: {
-    margin: "0",
-  },
-}
-
-// Add keyframe animation via style tag
-const styleSheet = document.createElement("style")
-styleSheet.textContent = `
-  @keyframes pulse {
-    0%, 60%, 100% { opacity: 0.3; }
-    30% { opacity: 1; }
-  }
-  textarea:focus {
-    border-color: rgba(167, 139, 250, 0.5) !important;
-    box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1) !important;
-  }
-`
-document.head.appendChild(styleSheet)
-
-export default Chatbot
